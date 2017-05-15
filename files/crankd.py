@@ -1,4 +1,4 @@
-#!/usr/bin/python2.5
+#!/usr/bin/python2.7
 # encoding: utf-8
 
 """
@@ -59,6 +59,7 @@ from PyObjCTools import AppHelper
 from functools import partial
 import signal
 from datetime import datetime
+from objc import super
 
 
 VERSION          = '$Revision: #4 $'
@@ -66,13 +67,14 @@ VERSION          = '$Revision: #4 $'
 HANDLER_OBJECTS  = dict()     # Events which have a "class" handler use an instantiated object; we want to load only one copy
 SC_HANDLERS      = dict()     # Callbacks indexed by SystemConfiguration keys
 FS_WATCHED_FILES = dict()     # Callbacks indexed by filesystem path
+WORKSPACE_HANDLERS = dict()   # handlers for workspace events
 
 
 class BaseHandler(object):
     # pylint: disable-msg=C0111,R0903
     pass
 
-class NSNotificationHandler(NSObject):
+class NotificationHandler(NSObject):
     """Simple base class for handling NSNotification events"""
     # Method names and class structure are dictated by Cocoa & PyObjC, which
     # is substantially different from PEP-8:
@@ -80,11 +82,11 @@ class NSNotificationHandler(NSObject):
 
     def init(self):
         """NSObject-compatible initializer"""
-        self = super(NSNotificationHandler, self).init()
+        self = super(NotificationHandler, self).init()
         if self is None: return None
         self.callable = self.not_implemented
         return self # NOTE: Unlike Python, NSObject's init() must return self!
-    
+
     def not_implemented(self, *args, **kwargs):
         """A dummy function which exists only to catch configuration errors"""
         # TODO: Is there a better way to report the caller's location?
@@ -208,9 +210,16 @@ def get_handler_object(class_name):
 
 def handle_sc_event(store, changed_keys, info):
     """Fire every event handler for one or more events"""
+    try:
+        for key in changed_keys:
+            SC_HANDLERS[key](key=key, info=info)
+    except KeyError:
+        # If there's no exact match, go through the list again assuming regex
+        for key in changed_keys:
+            for handler in SC_HANDLERS:
+                if re.match(handler, key):
+                    SC_HANDLERS[handler](key=key, info=info)
 
-    for key in changed_keys:
-        SC_HANDLERS[key](key=key, info=info)
 
 
 def list_events(option, opt_str, value, parser):
@@ -331,7 +340,7 @@ def configure_logging():
     # Normally this would not be necessary but logging assumes syslog listens on
     # localhost syslog/udp, which is disabled on 10.5 (rdar://5871746)
     syslog = logging.handlers.SysLogHandler('/var/run/syslog')
-    syslog.setFormatter(logging.Formatter('%(name)s: %(message)s'))
+    syslog.setFormatter(logging.Formatter('%(pathname)s[%(process)d]:%(message)s'))
     syslog.setLevel(logging.INFO)
     logging.getLogger().addHandler(syslog)
 
@@ -359,14 +368,14 @@ def add_workspace_notifications(nsw_config):
 
             notification_center.addObserver_selector_name_object_(obj, objc_method, event, None)
         else:
-            handler          = NSNotificationHandler.new()
+            handler          = NotificationHandler.new()
             handler.name     = "NSWorkspace Notification %s" % event
             handler.callable = get_callable_for_event(event, event_config, context=handler.name)
 
             assert(callable(handler.onNotification_))
 
             notification_center.addObserver_selector_name_object_(handler, "onNotification:", event, None)
-
+            WORKSPACE_HANDLERS[event] = handler
     log_list("Listening for these NSWorkspace notifications: %s", nsw_config.keys())
 
 
